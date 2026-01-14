@@ -1,6 +1,8 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
+import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils';
 import { GameState, GameZone, PlayerStats, GameTarget, GroundItem } from '../types';
 
 interface BoundingBox {
@@ -39,21 +41,21 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
     scene: THREE.Scene;
     camera: THREE.PerspectiveCamera;
     player: THREE.Group;
-    playerParts: { leftArm: THREE.Object3D, rightArm: THREE.Object3D, body: THREE.Object3D, weapon: THREE.Mesh, head: THREE.Object3D };
+    playerMixer?: THREE.AnimationMixer;
+    playerActions: Record<string, THREE.AnimationAction>;
+    currentAction?: string;
     playerNameplate: any;
-    enemies: { group: THREE.Group; mesh: THREE.Mesh; type: string; level: number; hp: number; maxHp: number; lastHitTime: number; lastAttackTime: number; parts: any; nameplate: any; wanderTarget: THREE.Vector3, spawnOrigin: THREE.Vector3 }[];
-    npcs: { group: THREE.Group; name: string; parts: any; nameplate: any, shoutPlate?: any, lastShoutTime: number, shoutInterval: number }[];
+    enemies: { group: THREE.Group; type: string; hp: number; maxHp: number; lastAttackTime: number; nameplate: any; mixer?: THREE.AnimationMixer; actions: Record<string, THREE.AnimationAction> }[];
+    npcs: { group: THREE.Group; name: string; nameplate: any; mixer?: THREE.AnimationMixer; actions: Record<string, THREE.AnimationAction> }[];
     lootMeshes: Map<string, THREE.Group>;
     keys: Record<string, boolean>;
     clock: THREE.Clock;
-    lastAttackTime: number;
-    isAttacking: boolean;
-    attackStartTime: number;
     raycaster: THREE.Raycaster;
     mouse: THREE.Vector2;
     zoom: number;
     textures: { grass: THREE.CanvasTexture, dirt: THREE.CanvasTexture, stone: THREE.CanvasTexture, floor: THREE.CanvasTexture, sand: THREE.CanvasTexture };
     colliders: BoundingBox[];
+    modelAsset?: any;
   } | null>(null);
 
   const generateProceduralTexture = (color1: string, color2: string) => {
@@ -79,8 +81,7 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
     const texture = new THREE.CanvasTexture(canvas);
     const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
     const sprite = new THREE.Sprite(material);
-    // Adjusted height for even larger models
-    sprite.position.y = 50;
+    sprite.position.y = 45;
     sprite.scale.set(15, 3.75, 1);
     return { context, texture, sprite, name, isPlayer, isNPC };
   };
@@ -98,11 +99,9 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
   };
 
   const checkCollision = (x: number, z: number, colliders: BoundingBox[]) => {
-    const r = 8.0; // Slightly larger radius for scaled characters
+    const r = 8.0; 
     for (const box of colliders) {
-      if (x + r > box.minX && x - r < box.maxX && z + r > box.minZ && z - r < box.maxZ) {
-        return true;
-      }
+      if (x + r > box.minX && x - r < box.maxX && z + r > box.minZ && z - r < box.maxZ) return true;
     }
     return false;
   };
@@ -112,13 +111,10 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
     group.name = "env_building_" + name;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x444444, side: THREE.DoubleSide });
     const floorMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.8 });
-    
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, d), floorMat);
     floor.rotation.x = -Math.PI / 2; floor.position.y = 0.15;
     group.add(floor);
-    
-    const h = 45; const t = 2;
-
+    const h = 45, t = 2;
     const addWallSegment = (posX: number, posZ: number, wallW: number, wallD: number) => {
       const wall = new THREE.Mesh(new THREE.BoxGeometry(wallW, h, wallD), wallMat);
       wall.position.set(posX, h/2, posZ);
@@ -128,53 +124,22 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
         minZ: z + posZ - wallD/2, maxZ: z + posZ + wallD/2
       });
     };
-
     addWallSegment(-w/2, 0, t, d);
     addWallSegment(w/2, 0, t, d);
+    const dw = 30;
     if (!northDoor) addWallSegment(0, -d/2, w, t);
     else {
-      const dw = 30;
       addWallSegment(-(w-dw)/4 - dw/2, -d/2, (w-dw)/2, t);
       addWallSegment((w-dw)/4 + dw/2, -d/2, (w-dw)/2, t);
     }
-    const dw = 30;
-    addWallSegment(-(w-dw)/4 - dw/2, d/2, (w-dw)/2, t);
-    addWallSegment((w-dw)/4 + dw/2, d/2, (w-dw)/2, t);
-
+    if (northDoor) addWallSegment(0, d/2, w, t);
+    else {
+      addWallSegment(-(w-dw)/4 - dw/2, d/2, (w-dw)/2, t);
+      addWallSegment((w-dw)/4 + dw/2, d/2, (w-dw)/2, t);
+    }
     group.position.set(x, 0, z);
     scene.add(group);
     return group;
-  };
-
-  const createHumanoid = (color: number, isPlayer = false) => {
-    // SCALING: Door height is 45. Target height is 3/4 of that (approx 33-34 units).
-    const group = new THREE.Group();
-    const mat = new THREE.MeshStandardMaterial({ color });
-    
-    // Body is a capsule. radius=5, length=12. Total height = 12 + 5 + 5 = 22.
-    const body = new THREE.Mesh(new THREE.CapsuleGeometry(5, 12, 4, 8), mat);
-    body.position.y = 14; group.add(body);
-    
-    // Head radius 4.5. Positioned to bring total height to ~33.
-    const head = new THREE.Mesh(new THREE.SphereGeometry(4.5, 8, 8), mat);
-    head.position.y = 28; group.add(head);
-    
-    const leftArm = new THREE.Group(); 
-    leftArm.position.set(-8, 20, 0); 
-    group.add(leftArm);
-    
-    const rightArm = new THREE.Group(); 
-    rightArm.position.set(8, 20, 0); 
-    group.add(rightArm);
-    
-    let weaponMesh = null;
-    if (isPlayer) {
-      weaponMesh = new THREE.Mesh(new THREE.BoxGeometry(0.5, 20, 2), new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.9 }));
-      weaponMesh.position.set(0, -10, 1.5); 
-      weaponMesh.rotation.x = Math.PI/2;
-      rightArm.add(weaponMesh);
-    }
-    return { group, parts: { leftArm, rightArm, body, head, weapon: weaponMesh } };
   };
 
   const createLootMesh = (loot: GroundItem) => {
@@ -187,16 +152,37 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
     return group;
   };
 
+  const createModelInstance = (asset: any, tintColor: number) => {
+    const model = SkeletonUtils.clone(asset.scene);
+    model.updateMatrixWorld(true);
+    const scale = 18; 
+    model.scale.set(scale, scale, scale);
+    model.traverse((child: any) => {
+      if (child.isMesh) {
+        child.material = child.material.clone();
+        child.material.color.lerp(new THREE.Color(tintColor), 0.5);
+        child.frustumCulled = false;
+      }
+    });
+    const mixer = new THREE.AnimationMixer(model);
+    const actions: Record<string, THREE.AnimationAction> = {};
+    asset.animations.forEach((clip: any) => {
+      actions[clip.name] = mixer.clipAction(clip);
+    });
+    return { model, mixer, actions };
+  };
+
   useEffect(() => {
     if (!containerRef.current) return;
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 8000);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 10000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setClearColor(0x000000);
     containerRef.current.appendChild(renderer.domElement);
     
-    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
     const sun = new THREE.DirectionalLight(0xffffff, 1.2);
     sun.position.set(200, 500, 200); scene.add(sun);
 
@@ -211,14 +197,36 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
     const ground = new THREE.Mesh(new THREE.PlaneGeometry(8000, 8000), new THREE.MeshStandardMaterial({ map: textures.grass }));
     ground.rotation.x = -Math.PI / 2; ground.name = "ground"; scene.add(ground);
 
-    const { group: player, parts: pParts } = createHumanoid(0x1a3a9a, true);
+    const player = new THREE.Group();
+    player.name = "player_root";
     scene.add(player);
     const playerNameplate = createNameplate("Hero", true); player.add(playerNameplate.sprite);
 
+    const pLight = new THREE.PointLight(0x33ccff, 1, 150);
+    pLight.position.y = 20;
+    player.add(pLight);
+
     const clock = new THREE.Clock();
     const keys: Record<string, boolean> = {};
-    engineRef.current = { renderer, scene, camera, player, playerParts: pParts as any, playerNameplate, enemies: [], npcs: [], lootMeshes: new Map(), keys, clock, lastAttackTime: 0, isAttacking: false, attackStartTime: 0, raycaster: new THREE.Raycaster(), mouse: new THREE.Vector2(), zoom: 1, textures, colliders: [] };
-    setIsEngineReady(true);
+    engineRef.current = { 
+      renderer, scene, camera, player, playerActions: {}, 
+      playerNameplate, enemies: [], npcs: [], 
+      lootMeshes: new Map(), keys, clock, 
+      raycaster: new THREE.Raycaster(), 
+      mouse: new THREE.Vector2(), zoom: 1.2, textures, colliders: [] 
+    };
+
+    const loader = new GLTFLoader();
+    loader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/models/gltf/Soldier.glb', (gltf) => {
+      engineRef.current!.modelAsset = gltf;
+      const { model, mixer, actions } = createModelInstance(gltf, 0xffffff);
+      player.add(model);
+      engineRef.current!.playerMixer = mixer;
+      engineRef.current!.playerActions = actions;
+      engineRef.current!.currentAction = 'Idle';
+      actions['Idle']?.play();
+      setIsEngineReady(true);
+    }, undefined, (err) => console.error("Model load failed:", err));
 
     const onKeyDown = (e: KeyboardEvent) => { keys[e.code] = true; };
     const onKeyUp = (e: KeyboardEvent) => { keys[e.code] = false; };
@@ -229,12 +237,10 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
       const { mouse, raycaster, camera, enemies, npcs, lootMeshes, player } = engineRef.current!;
       mouse.x = (e.clientX / window.innerWidth) * 2 - 1; mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
-      
       const enemyMeshes = enemies.map(en => en.group);
       const npcMeshes = npcs.map(n => n.group);
       const lootList = Array.from(lootMeshes.entries());
       const lootMeshObjects = lootList.map(([id, group]) => group);
-
       const eIntersects = raycaster.intersectObjects(enemyMeshes, true);
       const nIntersects = raycaster.intersectObjects(npcMeshes, true);
       const lIntersects = raycaster.intersectObjects(lootMeshObjects, true);
@@ -246,12 +252,11 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
           return;
         }
       }
-
       if (eIntersects.length > 0) {
-        const found = enemies.find(en => en.group === eIntersects[0].object.parent || en.group === eIntersects[0].object.parent?.parent);
+        const found = enemies.find(en => en.group === eIntersects[0].object.parent || en.group === eIntersects[0].object.parent?.parent || en.group === eIntersects[0].object.parent?.parent?.parent);
         if (found) callbacks.current.onTargetChange({ name: found.type, hp: found.hp, maxHp: found.maxHp, type: 'enemy' });
       } else if (nIntersects.length > 0) {
-        const found = npcs.find(n => n.group === nIntersects[0].object.parent || n.group === nIntersects[0].object.parent?.parent);
+        const found = npcs.find(n => n.group === nIntersects[0].object.parent || n.group === nIntersects[0].object.parent?.parent || n.group === nIntersects[0].object.parent?.parent?.parent);
         if (found) {
           callbacks.current.onTargetChange({ name: found.name, hp: 100, maxHp: 100, type: 'npc' });
           if (player.position.distanceTo(found.group.position) < 60) callbacks.current.onInteraction(found.name);
@@ -266,10 +271,13 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
       if (!engineRef.current) return;
       requestAnimationFrame(animate);
       const state = callbacks.current.gameState;
-      const { scene, camera, player, playerParts, playerNameplate, enemies, clock, zoom, colliders, lootMeshes } = engineRef.current;
+      const { renderer, scene, camera, player, playerMixer, playerActions, playerNameplate, enemies, npcs, clock, zoom, colliders, lootMeshes } = engineRef.current;
       const delta = clock.getDelta(); const time = clock.getElapsedTime();
 
-      // Sync Loot
+      if (playerMixer) playerMixer.update(delta);
+      enemies.forEach(en => en.mixer?.update(delta));
+      npcs.forEach(n => n.mixer?.update(delta));
+
       state.groundItems.forEach(loot => {
         if (!lootMeshes.has(loot.id)) {
           const m = createLootMesh(loot);
@@ -294,55 +302,78 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
         if (keys['KeyW']) moveVec.z -= 80 * delta; if (keys['KeyS']) moveVec.z += 80 * delta;
         if (keys['KeyA']) moveVec.x -= 80 * delta; if (keys['KeyD']) moveVec.x += 80 * delta;
         
-        if (moveVec.length() > 0) {
+        const isMoving = moveVec.lengthSq() > 0;
+        const targetActionName = isMoving ? 'Run' : 'Idle';
+        if (engineRef.current.currentAction !== targetActionName) {
+          const prevAction = playerActions[engineRef.current.currentAction!];
+          const nextAction = playerActions[targetActionName];
+          if (prevAction && nextAction) {
+            nextAction.reset().fadeIn(0.2).play();
+            prevAction.fadeOut(0.2);
+            engineRef.current.currentAction = targetActionName;
+          }
+        }
+
+        if (isMoving) {
           const nextX = player.position.x + moveVec.x;
           const nextZ = player.position.z + moveVec.z;
           if (!checkCollision(nextX, player.position.z, colliders)) player.position.x = nextX;
           if (!checkCollision(player.position.x, nextZ, colliders)) player.position.z = nextZ;
-          player.rotation.y = THREE.MathUtils.lerp(player.rotation.y, Math.atan2(moveVec.x, moveVec.z), 0.1);
-          
-          playerParts.leftArm.rotation.x = Math.sin(time * 10) * 1.2;
-          playerParts.rightArm.rotation.x = -Math.sin(time * 10) * 1.2;
+          const targetRotation = Math.atan2(moveVec.x, moveVec.z);
+          let diff = targetRotation - player.rotation.y;
+          while (diff < -Math.PI) diff += Math.PI * 2;
+          while (diff > Math.PI) diff -= Math.PI * 2;
+          player.rotation.y += diff * 0.15;
           callbacks.current.onPlayerMove(player.position.x, player.position.z);
-        } else {
-          playerParts.leftArm.rotation.x = THREE.MathUtils.lerp(playerParts.leftArm.rotation.x, 0, 0.1);
-          playerParts.rightArm.rotation.x = THREE.MathUtils.lerp(playerParts.rightArm.rotation.x, 0, 0.1);
         }
 
         if (actionTrigger?.current?.type === 'attack') {
           actionTrigger.current.type = null;
           if (state.target && state.target.type === 'enemy') {
-            const enemy = enemies.find(en => en.type === state.target?.name && en.group.position.distanceTo(player.position) < 50);
+            const enemy = enemies.find(en => en.type === state.target?.name && en.group.position.distanceTo(player.position) < 65);
             if (enemy) {
               const dmg = Math.floor(Math.random() * 15) + 10;
-              enemy.hp -= dmg; enemy.lastHitTime = time;
+              enemy.hp -= dmg;
               callbacks.current.onDamageDealt(dmg);
               callbacks.current.onTargetChange({ ...state.target, hp: enemy.hp });
               if (enemy.hp <= 0) {
-                scene.remove(enemy.group); engineRef.current.enemies = enemies.filter(en => en !== enemy);
-                callbacks.current.onEnemyDefeat(enemy.type, enemy.group.position.x, enemy.group.position.z);
-                callbacks.current.onTargetChange(null);
+                if (enemy.type === 'Training Dummy') {
+                  enemy.hp = enemy.maxHp; // Dummies reset
+                  callbacks.current.onTargetChange({ ...state.target, hp: enemy.hp });
+                } else {
+                  scene.remove(enemy.group); engineRef.current.enemies = enemies.filter(en => en !== enemy);
+                  callbacks.current.onEnemyDefeat(enemy.type, enemy.group.position.x, enemy.group.position.z);
+                  callbacks.current.onTargetChange(null);
+                }
               }
             }
           }
         }
 
         enemies.forEach(en => {
+          if (en.type === 'Training Dummy') {
+            updateNameplate(en.nameplate, en.hp, en.maxHp);
+            return;
+          }
           const dist = en.group.position.distanceTo(player.position);
           if (dist < 150) {
             const dir = new THREE.Vector3().subVectors(player.position, en.group.position).normalize();
             en.group.position.add(dir.multiplyScalar(30 * delta));
             en.group.rotation.y = Math.atan2(dir.x, dir.z);
+            if (en.actions['Run']) en.actions['Run'].play();
             if (dist < 30 && time - en.lastAttackTime > 2) {
               en.lastAttackTime = time;
               callbacks.current.onDamageTaken?.(10);
             }
+          } else {
+             if (en.actions['Idle']) en.actions['Idle'].play();
+             if (en.actions['Run']) en.actions['Run']?.stop();
           }
           updateNameplate(en.nameplate, en.hp, en.maxHp);
         });
 
         camera.position.lerp(new THREE.Vector3(player.position.x, player.position.y + 180 * zoom, player.position.z + 240 * zoom), 0.1);
-        camera.lookAt(player.position.x, player.position.y + 15, player.position.z);
+        camera.lookAt(player.position.x, player.position.y + 18, player.position.z);
       }
       renderer.render(scene, camera);
     };
@@ -356,43 +387,164 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
   }, []);
 
   useEffect(() => {
-    if (!isEngineReady || !engineRef.current) return;
-    const { scene, textures, enemies, npcs, player, colliders } = engineRef.current;
+    if (!isEngineReady || !engineRef.current || !engineRef.current.modelAsset) return;
+    const { scene, textures, enemies, npcs, player, colliders, modelAsset } = engineRef.current;
     
     scene.children.filter(o => o.name && o.name.startsWith('env_')).forEach(o => scene.remove(o));
     enemies.forEach(e => scene.remove(e.group));
     npcs.forEach(n => scene.remove(n.group));
     
     enemies.length = 0; npcs.length = 0; colliders.length = 0;
-    player.position.set(0, 0, 0);
+    player.position.set(0, 0, 150);
 
     const ground = scene.getObjectByName("ground") as THREE.Mesh;
     const groundMat = ground.material as THREE.MeshStandardMaterial;
 
-    const spawnNPC = (name: string, x: number, z: number, color = 0xcca100) => {
-      const { group } = createHumanoid(color);
+    const spawnNPC = (name: string, x: number, z: number, color = 0xcca100, rotation = 0) => {
+      const group = new THREE.Group();
+      const { model, mixer, actions } = createModelInstance(modelAsset, color);
+      group.add(model);
       group.position.set(x, 0, z); group.name = "npc_" + name;
+      group.rotation.y = rotation;
       const np = createNameplate(name, false, true); group.add(np.sprite);
       updateNameplate(np, 100, 100);
-      scene.add(group); npcs.push({ group, name, parts: {}, nameplate: np, lastShoutTime: 0, shoutInterval: 0 });
+      actions['Idle']?.play();
+      scene.add(group); 
+      npcs.push({ group, name, nameplate: np, mixer, actions });
     };
 
     const spawnEnemy = (type: string, x: number, z: number, hp: number) => {
-      const { group } = createHumanoid(0x444444);
+      const group = new THREE.Group();
+      const { model, mixer, actions } = createModelInstance(modelAsset, 0x444444); 
+      group.add(model);
       group.position.set(x, 0, z); group.name = "enemy_" + type;
       const np = createNameplate(type); group.add(np.sprite);
       updateNameplate(np, hp, hp);
-      scene.add(group); enemies.push({ group, mesh: null as any, type, level: 1, hp, maxHp: hp, lastHitTime: 0, lastAttackTime: 0, parts: {}, nameplate: np, wanderTarget: new THREE.Vector3(), spawnOrigin: new THREE.Vector3() });
+      actions['Idle']?.play();
+      scene.add(group); 
+      enemies.push({ group, type, hp, maxHp: hp, lastAttackTime: 0, nameplate: np, mixer, actions });
+    };
+
+    const spawnTrainingDummy = (x: number, z: number) => {
+      const group = new THREE.Group();
+      group.name = "env_dummy";
+      const woodMat = new THREE.MeshStandardMaterial({ map: textures.dirt, color: 0x8b4513 });
+      const strawMat = new THREE.MeshStandardMaterial({ map: textures.sand, color: 0xeedd88 });
+      
+      const post = new THREE.Mesh(new THREE.BoxGeometry(4, 30, 4), woodMat);
+      post.position.y = 15;
+      group.add(post);
+      
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(6, 15, 4, 8), strawMat);
+      body.position.y = 20;
+      group.add(body);
+
+      const crossBar = new THREE.Mesh(new THREE.BoxGeometry(20, 2, 2), woodMat);
+      crossBar.position.y = 25;
+      group.add(crossBar);
+
+      const np = createNameplate("Training Dummy");
+      group.add(np.sprite);
+      updateNameplate(np, 999, 999);
+
+      group.position.set(x, 0, z);
+      scene.add(group);
+      enemies.push({ group, type: 'Training Dummy', hp: 999, maxHp: 999, lastAttackTime: 0, nameplate: np, actions: {} });
+      colliders.push({ minX: x - 10, maxX: x + 10, minZ: z - 10, maxZ: z + 10 });
+    };
+
+    const spawnMagicWorkbench = (x: number, z: number) => {
+      const group = new THREE.Group();
+      group.name = "env_magic_table";
+      const woodMat = new THREE.MeshStandardMaterial({ map: textures.dirt, color: 0x2b1a10 });
+      const top = new THREE.Mesh(new THREE.BoxGeometry(45, 3, 20), woodMat);
+      top.position.y = 10;
+      group.add(top);
+      for (let i = 0; i < 4; i++) {
+        const leg = new THREE.Mesh(new THREE.BoxGeometry(1.5, 10, 1.5), woodMat);
+        leg.position.set(i % 2 === 0 ? 20 : -20, 5, i < 2 ? 8 : -8);
+        group.add(leg);
+      }
+      
+      const spawnPotion = (posX: number, posZ: number, color: number) => {
+        const pot = new THREE.Group();
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 2, 4, 8), new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.8 }));
+        const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 1.5, 8), new THREE.MeshStandardMaterial({ color: 0xeeeeee }));
+        neck.position.y = 2.5;
+        const stopper = new THREE.Mesh(new THREE.SphereGeometry(0.7), new THREE.MeshStandardMaterial({ color: 0x331100 }));
+        stopper.position.y = 3.2;
+        pot.add(body, neck, stopper);
+        pot.position.set(posX, 11.5, posZ);
+        group.add(pot);
+      };
+
+      spawnPotion(-15, 0, 0xff0000);
+      spawnPotion(-10, 3, 0x0000ff);
+      spawnPotion(-12, -4, 0x00ff00);
+
+      for (let i = 0; i < 5; i++) {
+        const coin = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 0.5, 8), new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.8 }));
+        coin.position.set(10 + Math.random() * 5, 11.5 + i * 0.6, Math.random() * 4 - 2);
+        coin.rotation.y = Math.random() * Math.PI;
+        group.add(coin);
+      }
+
+      group.position.set(x, 0, z);
+      scene.add(group);
+      colliders.push({ minX: x - 25, maxX: x + 25, minZ: z - 12, maxZ: z + 12 });
+    };
+
+    const spawnBlacksmithWorkbench = (x: number, z: number) => {
+      const group = new THREE.Group();
+      group.name = "env_workbench";
+      const woodMat = new THREE.MeshStandardMaterial({ map: textures.dirt, color: 0x4d2600 });
+      const top = new THREE.Mesh(new THREE.BoxGeometry(40, 4, 25), woodMat);
+      top.position.y = 10;
+      group.add(top);
+      for (let i = 0; i < 4; i++) {
+        const leg = new THREE.Mesh(new THREE.BoxGeometry(2, 10, 2), woodMat);
+        leg.position.set(i % 2 === 0 ? 18 : -18, 5, i < 2 ? 10 : -10);
+        group.add(leg);
+      }
+      
+      const shield = new THREE.Group();
+      const sBody = new THREE.Mesh(new THREE.CylinderGeometry(8, 8, 1, 16), new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.8 }));
+      const sRim = new THREE.Mesh(new THREE.TorusGeometry(8, 0.5, 8, 32), new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 1.0 }));
+      sRim.rotation.x = Math.PI / 2;
+      shield.add(sBody, sRim);
+      shield.position.set(-8, 12.5, 0);
+      shield.rotation.x = 0.2;
+      group.add(shield);
+
+      const spawnSword = (posX: number, posZ: number, rotY: number) => {
+        const sword = new THREE.Group();
+        const blade = new THREE.Mesh(new THREE.BoxGeometry(1, 15, 0.2), new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.9 }));
+        blade.position.y = 7.5;
+        const guard = new THREE.Mesh(new THREE.BoxGeometry(4, 0.5, 0.5), new THREE.MeshStandardMaterial({ color: 0x553311 }));
+        const hilt = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 3), new THREE.MeshStandardMaterial({ color: 0x553311 }));
+        hilt.position.y = -1.5;
+        sword.add(blade, guard, hilt);
+        sword.rotation.z = Math.PI / 2;
+        sword.rotation.y = rotY;
+        sword.position.set(posX, 12.5, posZ);
+        group.add(sword);
+      };
+
+      spawnSword(8, -5, 0.5);
+      spawnSword(12, 5, -0.3);
+
+      group.position.set(x, 0, z);
+      scene.add(group);
+      colliders.push({ minX: x - 20, maxX: x + 20, minZ: z - 12, maxZ: z + 12 });
     };
 
     if (gameState.zone === 'Castle') {
       groundMat.map = textures.stone; groundMat.needsUpdate = true;
       const citySize = 800;
-      const wallGeo = new THREE.BoxGeometry(20, 100, 20);
       const wallMat = new THREE.MeshStandardMaterial({ map: textures.stone, color: 0x333333 });
-      
+      const wallGeo = new THREE.BoxGeometry(20, 100, 20);
       for (let i = -citySize/2; i <= citySize/2; i += 20) {
-        if (Math.abs(i) > 40) {
+        if (Math.abs(i) > 60) {
           const wallN = new THREE.Mesh(wallGeo, wallMat); wallN.position.set(i, 50, -citySize/2); wallN.name="env_wall"; scene.add(wallN);
           colliders.push({ minX: i-10, maxX: i+10, minZ: -citySize/2-10, maxZ: -citySize/2+10 });
         }
@@ -403,41 +555,36 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
         const wallE = new THREE.Mesh(wallGeo, wallMat); wallE.position.set(citySize/2, 50, i); wallE.name="env_wall"; scene.add(wallE);
         colliders.push({ minX: citySize/2-10, maxX: citySize/2+10, minZ: i-10, maxZ: i+10 });
       }
-
-      // CENTRAL FOUNTAIN (Visual centerpiece)
       const fountainGeo = new THREE.CylinderGeometry(40, 50, 10, 8);
-      const fountainMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
-      const fountain = new THREE.Mesh(fountainGeo, fountainMat);
+      const fountain = new THREE.Mesh(fountainGeo, new THREE.MeshStandardMaterial({ color: 0x222222 }));
       fountain.position.set(0, 5, 0); fountain.name = "env_fountain"; scene.add(fountain);
-      const waterGeo = new THREE.SphereGeometry(30, 16, 16);
-      const waterMat = new THREE.MeshStandardMaterial({ color: 0x00aaff, transparent: true, opacity: 0.6, emissive: 0x0044ff });
-      const water = new THREE.Mesh(waterGeo, waterMat);
+      const water = new THREE.Mesh(new THREE.SphereGeometry(30, 16, 16), new THREE.MeshStandardMaterial({ color: 0x00aaff, transparent: true, opacity: 0.6, emissive: 0x0044ff }));
       water.position.set(0, 20, 0); water.name = "env_fountain_core"; scene.add(water);
-      colliders.push({ minX: -50, maxX: 50, minZ: -50, maxZ: 50 });
+      colliders.push({ minX: -55, maxX: 55, minZ: -55, maxZ: 55 });
 
-      // GUILDS & SHOPS
-      spawnBuilding(scene, -200, -350, 100, 100, 0x440000, "Warrior Guild");
-      spawnNPC("Warrior Master", -200, -280, 0xaa0000);
+      spawnBuilding(scene, -320, -250, 100, 120, 0x440000, "Warrior Guild", false);
+      spawnNPC("Warrior Master", -320, -170, 0xff0000, Math.PI); // Facing North
+      spawnTrainingDummy(-285, -170);
+      spawnTrainingDummy(-355, -170);
 
-      spawnBuilding(scene, 200, -350, 100, 100, 0x000044, "Mage Guild");
-      spawnNPC("Magister", 200, -280, 0x0000ff);
+      spawnBuilding(scene, 320, -250, 100, 120, 0x000044, "Mage Guild", false);
+      spawnNPC("Magister", 320, -170, 0x0000ff);
+      spawnBuilding(scene, -320, 250, 100, 120, 0x004400, "Archer Guild", true);
+      spawnNPC("Master Archer", -320, 170, 0x00ff00);
+      spawnBuilding(scene, 320, 250, 100, 120, 0x333333, "Blacksmith Shop", true);
+      spawnNPC("Blacksmith", 320, 170, 0x555555);
+      spawnBlacksmithWorkbench(320, 140); // North of Blacksmith (Z decreases)
 
-      spawnBuilding(scene, -200, 350, 100, 100, 0x004400, "Archer Guild");
-      spawnNPC("Master Archer", -200, 280, 0x00ff00);
+      spawnBuilding(scene, 0, 330, 120, 80, 0x440044, "Magic Shop", true);
+      spawnNPC("Magic Seller", 0, 270, 0xaa00aa);
+      spawnMagicWorkbench(0, 240); // North of Magic Seller
 
-      spawnBuilding(scene, 200, 350, 100, 100, 0x333333, "Blacksmith Shop");
-      spawnNPC("Blacksmith", 200, 280, 0x555555);
-
-      spawnBuilding(scene, 0, -350, 120, 80, 0x440044, "Magic Shop");
-      spawnNPC("Magic Seller", 0, -290, 0xaa00aa);
-
-      spawnNPC("Aether Sage", 100, -100, 0xeeeeee);
-      spawnNPC("Gatekeeper Milia", 350, 0, 0x00aaaa);
-      
+      spawnNPC("Aether Sage", 120, 0, 0xeeeeee);
+      spawnNPC("Gatekeeper Milia", 250, 80, 0x00aaaa);
     } else if (gameState.zone === 'Forest') {
       groundMat.map = textures.grass; groundMat.needsUpdate = true;
       for (let i = 0; i < 40; i++) {
-        const x = (Math.random()-0.5)*1500; const z = (Math.random()-0.5)*1500;
+        const x = (Math.random()-0.5)*1500, z = (Math.random()-0.5)*1500;
         const tree = new THREE.Mesh(new THREE.BoxGeometry(10, 80, 10), new THREE.MeshStandardMaterial({ color: 0x4d2600 }));
         tree.position.set(x, 40, z); tree.name = "env_tree"; scene.add(tree);
         colliders.push({ minX: x-5, maxX: x+5, minZ: z-5, maxZ: z+5 });
@@ -446,7 +593,7 @@ const GameCanvas: React.FC<GameCanvasProps> = (props) => {
     } else if (gameState.zone === 'Village') {
       groundMat.map = textures.sand; groundMat.needsUpdate = true;
       for (let i = 0; i < 20; i++) {
-        const x = (Math.random()-0.5)*1000; const z = (Math.random()-0.5)*1000;
+        const x = (Math.random()-0.5)*1000, z = (Math.random()-0.5)*1000;
         const ruin = new THREE.Mesh(new THREE.BoxGeometry(30, Math.random()*40, 30), new THREE.MeshStandardMaterial({ color: 0x333333 }));
         ruin.position.set(x, 15, z); ruin.name = "env_ruin"; scene.add(ruin);
         colliders.push({ minX: x-15, maxX: x+15, minZ: z-15, maxZ: z+15 });
