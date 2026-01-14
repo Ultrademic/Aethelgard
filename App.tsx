@@ -11,6 +11,7 @@ import ClassSelection from './components/ClassSelection';
 import WorldMapOverlay from './components/WorldMapOverlay';
 import QuestWindow from './components/QuestWindow';
 import TeleportMenu from './components/TeleportMenu';
+import { GoogleGenAI } from "@google/genai";
 
 const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>({
@@ -28,7 +29,7 @@ const App: React.FC = () => {
     lastAbilityTime: 0,
     abilityCooldown: 5000,
     target: null,
-    logs: ["Welcome to Aethelgard Castle Town. Your journey begins."],
+    logs: ["Welcome to Aethelgard. Seek your destiny in the town guilds."],
     soulshotsActive: false,
     groundItems: [],
     showMap: false,
@@ -39,21 +40,20 @@ const App: React.FC = () => {
     musicVolume: 0.4,
   });
 
+  const [isAiLoading, setIsAiLoading] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [showTeleportMenu, setShowTeleportMenu] = useState(false);
   const [isHit, setIsHit] = useState(false);
   const actionTrigger = useRef<{ type: 'attack' | 'skill' | null }>({ type: null });
 
-  // Handle Background Music
   useEffect(() => {
     if (!audioRef.current) {
-      audioRef.current = new Audio('aethelgard_theme.mp3');
+      audioRef.current = new Audio('https://assets.mixkit.co/music/preview/mixkit-mystical-riddles-162.mp3');
       audioRef.current.loop = true;
     }
-
     if (gameState.musicEnabled && gameState.playerClass && !gameState.isGameOver) {
       audioRef.current.volume = gameState.musicVolume;
-      audioRef.current.play().catch(e => console.log("Music play blocked by browser. Need interaction."));
+      audioRef.current.play().catch(() => {});
     } else {
       audioRef.current.pause();
     }
@@ -72,129 +72,94 @@ const App: React.FC = () => {
       playerClass: cls, 
       stats: { ...INITIAL_STATS[cls] } 
     }));
-    addLog(`Destiny chosen: The path of the ${cls}.`);
+    addLog(`Path chosen: ${cls}. Visit your Guild Master in town.`);
   };
 
   const startZoneTransition = useCallback((nextZone: GameZone) => {
     if (gameState.isTransitioning) return;
     setGameState(prev => ({ ...prev, isTransitioning: true }));
-    addLog(`Entering ${nextZone}...`);
+    addLog(`Traveling to ${nextZone}...`);
     setTimeout(() => {
-      setGameState(prev => ({ ...prev, zone: nextZone, playerPosition: { x: 0, z: 0 } }));
+      setGameState(prev => ({ ...prev, zone: nextZone, playerPosition: { x: 0, z: 0 }, target: null, groundItems: [] }));
     }, 1000);
     setTimeout(() => {
-      setGameState(prev => ({ ...prev, zone: nextZone, isTransitioning: false }));
+      setGameState(prev => ({ ...prev, isTransitioning: false }));
     }, 2000);
   }, [gameState.isTransitioning, addLog]);
 
-  const handleRespawn = () => {
-    addLog("Returning to the safety of Aethelgard Castle Town...");
-    setGameState(prev => ({
-      ...prev,
-      isGameOver: false,
-      zone: 'Castle',
-      playerPosition: { x: 0, z: 0 },
-      stats: { 
-        ...prev.stats, 
-        health: prev.stats.maxHealth, 
-        mana: prev.stats.maxMana,
-        xp: Math.max(0, prev.stats.xp - 50) 
-      }
-    }));
+  const handleAetherSage = async () => {
+    setIsAiLoading(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const prompt = `The player is a Level ${gameState.stats.level} ${gameState.playerClass} currently in ${gameState.zone}. 
+      As the Aether Sage, give them one sentence of cryptic but helpful advice about their current situation or the world of Aethelgard. 
+      Keep it high-fantasy and immersive.`;
+      
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+      });
+
+      setGameState(prev => ({
+        ...prev,
+        dialogue: {
+          npc: 'Aether Sage',
+          message: response.text || "The Aether is silent today, wanderer.",
+          options: [{ text: "I understand, Sage.", action: () => setGameState(p => ({ ...p, dialogue: null })) }]
+        }
+      }));
+    } catch (error) {
+      addLog("The Sage's voice is lost in the wind...");
+    } finally {
+      setIsAiLoading(false);
+    }
   };
 
-  const spawnLoot = useCallback((x: number, z: number, type: 'gold' | 'item', amount: number, name: string) => {
-    setGameState(prev => ({
-      ...prev,
-      groundItems: [...prev.groundItems, { id: Math.random().toString(), name, amount, type, position: { x, z } }]
-    }));
-  }, []);
-
-  const pickupLoot = useCallback((id: string) => {
-    setGameState(prev => {
-      const item = prev.groundItems.find(i => i.id === id);
-      if (!item) return prev;
-      addLog(item.type === 'gold' ? `Picked up ${item.amount} Aethertouch.` : `Found ${item.name}!`);
-      const newStats = { ...prev.stats };
-      if (item.type === 'gold') newStats.gold += item.amount;
-      return {
-        ...prev,
-        stats: newStats,
-        inventory: item.type === 'item' ? [...prev.inventory, SHOP_ITEMS.find(i => i.name === item.name) || { id: 'tmp', name: item.name, type: 'quest' } as InventoryItem] : prev.inventory,
-        groundItems: prev.groundItems.filter(i => i.id !== id)
-      };
-    });
-  }, [addLog]);
-
   const handleInteraction = useCallback(async (npc: string) => {
-    if (npc === 'Gatekeeper Milia') {
-      const message = "Greetings, traveler. The Aether flows through the gates of the Castle Town. Where does your path lead today?";
+    if (npc === 'Aether Sage') {
+      handleAetherSage();
+    } else if (npc === 'Gatekeeper Milia') {
       setGameState(prev => ({
         ...prev,
         dialogue: {
           npc: 'Gatekeeper Milia',
-          message,
+          message: "The Aether flows freely today. Where shall I send you?",
           options: [
             { text: "Teleport to distant lands", action: () => { setShowTeleportMenu(true); setGameState(p => ({ ...p, dialogue: null })); } },
             { text: "Farewell", action: () => setGameState(p => ({ ...p, dialogue: null })) }
           ]
         }
       }));
-      return;
-    }
-
-    if (npc === 'Archmagister Valerius') {
+    } else if (npc === 'Warrior Master' || npc === 'Magister' || npc === 'Master Archer') {
       const readyQuest = gameState.quests.find(q => q.active && q.progress >= q.count);
       const message = readyQuest 
-        ? `Ah, I see the glow of success in your eyes. Is the task done?`
-        : "May the Aether guide your steps through the ruins.";
-
+        ? `Impressive. You have completed the task.`
+        : `Welcome. I have tasks for those seeking to sharpen their skills.`;
       const options: DialogueOption[] = [];
-      if (readyQuest) {
-        options.push({ text: `Turn In Quest: ${readyQuest.title}`, action: () => completeQuest(readyQuest.id) });
-      } else {
-        const nextQuest = gameState.quests.find(q => !q.active && (!q.completed || q.repeatable));
-        if (nextQuest) options.push({ text: `Quest: ${nextQuest.title}`, action: () => acceptQuest(nextQuest.id) });
+      if (readyQuest) options.push({ text: `Turn In Quest`, action: () => completeQuest(readyQuest.id) });
+      else {
+        const nextQuest = gameState.quests.find(q => !q.active);
+        if (nextQuest) options.push({ text: `Take Quest: ${nextQuest.title}`, action: () => acceptQuest(nextQuest.id) });
       }
-      options.push({ text: "Farewell", action: () => setGameState(p => ({ ...p, dialogue: null })) });
-      setGameState(prev => ({ ...prev, dialogue: { npc: 'Archmagister Valerius', message, options } }));
-    }
-    
-    if (npc === 'Shopkeeper') {
+      options.push({ text: "Leave", action: () => setGameState(p => ({ ...p, dialogue: null })) });
+      setGameState(prev => ({ ...prev, dialogue: { npc, message, options } }));
+    } else if (npc === 'Zephyr' || npc === 'Armor Seller' || npc === 'Blacksmith' || npc === 'Magic Seller') {
       setGameState(prev => ({
         ...prev,
         dialogue: {
-          npc: 'Shopkeeper',
-          message: "Welcome to the capital armory. We have basic equipment to keep you alive.",
-          options: SHOP_ITEMS.filter(i => i.type !== 'cosmetic').map(item => ({ text: `${item.name} (${item.cost} AT)`, action: () => buyItem(item) })).concat([{ text: "Leave", action: () => setGameState(p => ({ ...p, dialogue: null })) }])
+          npc,
+          message: "My goods are the finest in Aethelgard. Take a look.",
+          options: SHOP_ITEMS.map(item => ({ text: `${item.name} (${item.cost} AT)`, action: () => buyItem(item) })).concat([{ text: "Leave", action: () => setGameState(p => ({ ...p, dialogue: null })) }])
         }
       }));
     }
-  }, [gameState.quests, gameState.stats.level, gameState.playerClass]);
-
-  const handleTeleport = (targetZone: GameZone, cost: number) => {
-    if (gameState.stats.gold < cost) {
-      setGameState(prev => ({
-        ...prev,
-        dialogue: {
-          npc: 'Gatekeeper Milia',
-          message: "You lack the Aethertouch required for this journey.",
-          options: [{ text: "I understand", action: () => setGameState(p => ({ ...p, dialogue: null })) }]
-        }
-      }));
-      setShowTeleportMenu(false);
-      return;
-    }
-    setGameState(prev => ({ ...prev, stats: { ...prev.stats, gold: prev.stats.gold - cost } }));
-    setShowTeleportMenu(false);
-    startZoneTransition(targetZone);
-  };
+  }, [gameState.quests, gameState.stats, gameState.playerClass, gameState.zone]);
 
   const completeQuest = (id: number) => {
     setGameState(prev => {
       const quest = prev.quests.find(q => q.id === id);
       if (!quest) return prev;
-      addLog(`Quest Completed: ${quest.title}.`);
+      addLog(`Quest Completed: ${quest.title}. Received ${quest.rewardGold} AT.`);
       return { 
         ...prev, 
         stats: { ...prev.stats, gold: prev.stats.gold + quest.rewardGold, xp: prev.stats.xp + 100 }, 
@@ -218,7 +183,10 @@ const App: React.FC = () => {
 
   const buyItem = (item: InventoryItem) => {
     setGameState(prev => {
-      if (prev.stats.gold < (item.cost || 0)) return prev;
+      if (prev.stats.gold < (item.cost || 0)) {
+        addLog("Not enough gold.");
+        return prev;
+      }
       addLog(`Purchased ${item.name}.`);
       return {
         ...prev,
@@ -243,10 +211,7 @@ const App: React.FC = () => {
     setGameState(prev => {
       const item = slot === 'weapon' ? prev.equippedWeapon : slot === 'armor' ? prev.equippedArmor : prev.equippedCosmetic;
       if (item) addLog(`Unequipped ${item.name}.`);
-      return {
-        ...prev,
-        [slot === 'weapon' ? 'equippedWeapon' : slot === 'armor' ? 'equippedArmor' : 'equippedCosmetic']: null
-      };
+      return { ...prev, [slot === 'weapon' ? 'equippedWeapon' : slot === 'armor' ? 'equippedArmor' : 'equippedCosmetic']: null };
     });
   };
 
@@ -254,31 +219,25 @@ const App: React.FC = () => {
     setGameState(prev => {
       const updated = { ...prev.stats, ...newStats };
       if (updated.xp >= updated.level * 100) {
-          addLog(`ASCENSION! LEVEL ${updated.level + 1}!`);
-          updated.level += 1;
-          updated.xp = 0;
-          updated.health = updated.maxHealth;
+          addLog(`LEVEL UP! You are now level ${updated.level + 1}!`);
+          updated.level += 1; updated.xp = 0; updated.health = updated.maxHealth;
       }
       return { ...prev, stats: updated };
     });
   };
 
-  const updatePlayerPosition = useCallback((x: number, z: number) => {
-    setGameState(prev => ({ ...prev, playerPosition: { x, z } }));
-  }, []);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setGameState(prev => ({ ...prev, isPaused: !prev.isPaused }));
-      if (e.key === 'm' || e.key === 'M') setGameState(prev => ({ ...prev, showMap: !prev.showMap }));
-      if (e.key === 'q' || e.key === 'Q') setGameState(prev => ({ ...prev, showQuestWindow: !prev.showQuestWindow }));
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  const handleManualAction = (type: 'attack' | 'skill') => {
-    actionTrigger.current = { type };
+  const pickupLoot = (id: string) => {
+    setGameState(prev => {
+      const item = prev.groundItems.find(i => i.id === id);
+      if (!item) return prev;
+      addLog(`Picked up ${item.amount > 0 ? item.amount + ' gold' : item.name}.`);
+      return {
+        ...prev,
+        stats: { ...prev.stats, gold: prev.stats.gold + (item.type === 'gold' ? item.amount : 0) },
+        inventory: item.type === 'item' ? [...prev.inventory, { id: Math.random().toString(), name: item.name, type: 'consumable' }] : prev.inventory,
+        groundItems: prev.groundItems.filter(i => i.id !== id)
+      };
+    });
   };
 
   return (
@@ -288,13 +247,14 @@ const App: React.FC = () => {
         onInteraction={handleInteraction}
         onStatUpdate={updateStats}
         onZoneChange={startZoneTransition}
-        onPlayerMove={updatePlayerPosition}
+        onPlayerMove={(x, z) => setGameState(prev => ({ ...prev, playerPosition: { x, z } }))}
         onEnemyDefeat={(type, x, z) => {
           addLog(`${type} slain.`);
-          spawnLoot(x, z, 'gold', Math.floor(Math.random() * 20) + 15, 'Aethertouch');
+          const lootId = Math.random().toString();
           setGameState(prev => ({
             ...prev,
-            quests: prev.quests.map(q => (q.active && q.target === type) ? { ...q, progress: Math.min(q.count, q.progress + 1) } : q)
+            quests: prev.quests.map(q => (q.active && q.target === type) ? { ...q, progress: Math.min(q.count, q.progress + 1) } : q),
+            groundItems: [...prev.groundItems, { id: lootId, name: 'Gold Pouch', type: 'gold', amount: 15, position: { x, z } }]
           }));
         }}
         onUseMana={(amt) => setGameState(prev => ({ ...prev, stats: { ...prev.stats, mana: Math.max(0, prev.stats.mana - amt) } }))}
@@ -317,16 +277,11 @@ const App: React.FC = () => {
       {isHit && <div className="absolute inset-0 bg-red-600/30 pointer-events-none z-[120] animate-pulse" />}
 
       {gameState.isGameOver && (
-        <div className="absolute inset-0 z-[200] bg-black/90 backdrop-blur-xl flex flex-col items-center justify-center p-8 animate-in fade-in duration-1000">
-          <h2 className="rpg-font text-6xl text-red-600 tracking-[0.4em] mb-4">CRITICALLY WOUNDED</h2>
-          <p className="text-zinc-500 text-sm tracking-widest uppercase mb-12">Your soul has drifted too far from the world flow...</p>
-          <button 
-            onClick={handleRespawn}
-            className="px-12 py-4 bg-zinc-900 border border-zinc-700 hover:border-amber-500 text-amber-500 rpg-font tracking-widest transition-all hover:bg-zinc-800 shadow-[0_0_50px_rgba(239,68,68,0.2)]"
-          >
-            RETURN TO THE CASTLE TOWN
+        <div className="absolute inset-0 z-[200] bg-black/90 backdrop-blur-xl flex flex-col items-center justify-center p-8">
+          <h2 className="rpg-font text-6xl text-red-600 tracking-[0.4em] mb-4 uppercase">Critically Wounded</h2>
+          <button onClick={() => setGameState(prev => ({ ...prev, isGameOver: false, stats: { ...prev.stats, health: prev.stats.maxHealth }, playerPosition: { x: 0, z: 0 } }))} className="px-12 py-4 bg-zinc-900 border border-zinc-700 hover:border-amber-500 text-amber-500 rpg-font tracking-widest transition-all">
+            Return to Town
           </button>
-          <p className="mt-8 text-[9px] text-zinc-700 uppercase tracking-widest italic">- Penalty: Loss of Soul Essence (XP) -</p>
         </div>
       )}
 
@@ -339,23 +294,13 @@ const App: React.FC = () => {
             onToggleSoulshot={() => setGameState(prev => ({ ...prev, soulshotsActive: !prev.soulshotsActive }))}
             onToggleMap={() => setGameState(prev => ({ ...prev, showMap: !prev.showMap }))}
             onToggleQuests={() => setGameState(p => ({ ...p, showQuestWindow: !p.showQuestWindow }))}
-            onToggleMusic={() => setGameState(p => ({ ...p, musicEnabled: !p.musicEnabled }))}
-            onAttack={() => handleManualAction('attack')}
-            onSkill={() => handleManualAction('skill')}
+            onAttack={() => { actionTrigger.current = { type: 'attack' }; }}
+            onSkill={() => { actionTrigger.current = { type: 'skill' }; }}
           />
           {gameState.isTransitioning && <ZoneTransition zone={gameState.zone} />}
-          {gameState.dialogue && <DialogueBox dialogue={gameState.dialogue} onClose={() => setGameState(p => ({ ...p, dialogue: null }))} />}
-          {showTeleportMenu && <TeleportMenu onClose={() => setShowTeleportMenu(false)} onTeleport={handleTeleport} currentZone={gameState.zone} gold={gameState.stats.gold} />}
-          {gameState.isPaused && (
-            <Menu 
-              gameState={gameState}
-              onClose={() => setGameState(p => ({ ...p, isPaused: false }))} 
-              onOpenQuests={() => setGameState(p => ({ ...p, isPaused: false, showQuestWindow: true }))}
-              onEquip={equipItem}
-              onUnequip={unequipItem}
-              onUpdateVolume={(v) => setGameState(p => ({ ...p, musicVolume: v }))}
-            />
-          )}
+          {gameState.dialogue && <DialogueBox dialogue={gameState.dialogue} onClose={() => setGameState(p => ({ ...p, dialogue: null }))} isLoading={isAiLoading} />}
+          {showTeleportMenu && <TeleportMenu onClose={() => setShowTeleportMenu(false)} onTeleport={(z, c) => { setShowTeleportMenu(false); startZoneTransition(z); setGameState(p => ({ ...p, stats: { ...p.stats, gold: p.stats.gold - c } })); }} currentZone={gameState.zone} gold={gameState.stats.gold} />}
+          {gameState.isPaused && <Menu gameState={gameState} onClose={() => setGameState(p => ({ ...p, isPaused: false }))} onOpenQuests={() => setGameState(p => ({ ...p, isPaused: false, showQuestWindow: true }))} onEquip={equipItem} onUnequip={unequipItem} onUpdateVolume={(v) => setGameState(p => ({ ...p, musicVolume: v }))} />}
           {gameState.showMap && <WorldMapOverlay zone={gameState.zone} playerPosition={gameState.playerPosition} onClose={() => setGameState(p => ({ ...p, showMap: false }))} />}
           {gameState.showQuestWindow && <QuestWindow quests={gameState.quests} onClose={() => setGameState(p => ({ ...p, showQuestWindow: false }))} zone={gameState.zone} playerClass={gameState.playerClass} />}
         </>
